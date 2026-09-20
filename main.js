@@ -5,59 +5,65 @@ import GUI from "lil-gui";
 
 const params = {
   forma: "circular",
-  radio: 0.55,
-  largo: 0.38,
+  radio: 0.43,
+  largo: 0.5,
   colorAgua: "#3d6a78",
-  sunColor: "#ffffff",
+  sunColor: "#ffd49f",
   sunElevation: 0,
   sunAzimuth: 25,
-  distortion: 3.7,
-  waveSize: 8,
+  distortion: 3.4,
+  waveSize: 10,
   waveSpeed: 0.6,
   alphaAgua: 0.9,
   frecuencia: 48,
   amplitud: 0.045,
-  luz: 0.72,
-  radioReflejo: 0.55,
-  vasoY: 2.25,
-  vasoX: 0,
+  luz: 0.9430788416,
+  radioReflejo: 0.64,
+  vasoY: 1.68,
+  vasoX: -0.43,
   vasoZ: 0,
   vasoAmp: 0,
   vasoFreq: 2.4,
   vasoOctaves: 3,
   vasoSpeed: 0,
   vasoSeed: 11,
-  criaturas: 0.85,
+  criaturas: 0.9973515250990317,
   noiseDeform: 0.35,
   proyector: "abajo",
-  lamparaX: 0,
+  lamparaX: -0.35,
   lamparaZ: 0,
-  lamparaY: 0,
-  temperatura: 9000,
-  estado: 0,
+  lamparaY: 0.02,
+  temperatura: 2710.3481687457243,
+  estado: 0.922,
   audio: false,
-  bioX: 0,
-  bioY: 1.7,
-  bioZ: -1.55,
-  bioRotX: 0,
-  bioRotY: 0,
-  bioRotZ: 0,
-  bioAncho: 3.4,
-  bioAlto: 3.2,
-  bioAmp: 0.18,
-  bioFreq: 2.4,
-  bioOctaves: 4,
+  bioX: -0.55,
+  bioY: 0.4,
+  bioZ: 0.3,
+  bioRotX: 90,
+  bioRotY: 3,
+  bioRotZ: 3,
+  bioAncho: 3.7,
+  bioAlto: 3.1,
+  bioAmp: 0.85,
+  bioFreq: 7.2,
+  bioOctaves: 6,
   bioSpeed: 0,
-  bioSeed: 17,
-  bioColor: "#2a2e32",
-  bioProyX: 0,
-  bioProyY: 3.72,
-  bioProyZ: -1.15,
-  bioProyRotX: -90,
-  bioProyRotY: 0,
-  bioProyRotZ: 0,
-  bioProyRadio: 1.35,
-  bioProyCaustica: true,
+  bioSeed: 21,
+  bioColor: "#919191",
+  bioOpacity: 0.38,
+  bioProyX: 0.06,
+  bioProyY: 4.03,
+  bioProyZ: -1.04,
+  bioProyRotX: -98,
+  bioProyRotY: 3,
+  bioProyRotZ: -40,
+  bioProyRadio: 6,
+  bioProyCaustica: false,
+};
+
+const START_CAMERA = {
+  position: [-3.070255356185929, 1.8191879459827465, -10.791863732998188],
+  target: [0, 1.45, 0],
 };
 
 // Edit umbral → inmersión here. Keys in both states are interpolated.
@@ -103,7 +109,7 @@ let waterNormals = null;
 let projectorGroup, projectorSpot, beamMesh, transducer;
 let bioProjectorGroup, bioProjectorSpot, bioBeamMesh;
 let bioCausticMat, bioCausticPatch, bioCurtainCausticMat, bioCurtainCaustic;
-let bioCreatureMat, bioCreaturePatch;
+let bioCreatureMat, bioCreaturePatch, bioCurtainCreature;
 let rimMat = null;
 let vesselGeos = [];
 let fieldHowl = null;
@@ -114,6 +120,13 @@ const WATER_NORMALS_URL = "./textures/waternormals.jpg";
 const PRESENTATION = ["1", "true", "yes", "on"].includes(
   (new URLSearchParams(location.search).get("presentacion") || "").toLowerCase()
 );
+{
+  const qsEstado = new URLSearchParams(location.search).get("estado");
+  if (qsEstado != null && qsEstado !== "") {
+    const v = parseFloat(qsEstado);
+    if (Number.isFinite(v)) params.estado = THREE.MathUtils.clamp(v, 0, 1);
+  }
+}
 
 const rumble = { value: 0 };
 const tmpColor = new THREE.Color();
@@ -261,15 +274,15 @@ function init() {
   scene.background = new THREE.Color(0x07080a);
   scene.fog = new THREE.FogExp2(0x07080a, 0.04);
 
-  camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 40);
-  camera.position.set(-2.7, 2.15, 3.5);
+  camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 80);
+  camera.position.fromArray(START_CAMERA.position);
 
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 1.45, 0);
+  controls.target.fromArray(START_CAMERA.target);
   controls.enableDamping = true;
   controls.maxPolarAngle = Math.PI * 0.49;
   controls.minDistance = 1.4;
-  controls.maxDistance = 9;
+  controls.maxDistance = 18;
 
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
@@ -1096,6 +1109,9 @@ function buildBioProjector() {
   bioCreaturePatch = new THREE.Mesh(new THREE.CircleGeometry(1, 64), bioCreatureMat);
   bioCreaturePatch.renderOrder = 4;
   scene.add(bioCreaturePatch);
+  bioCurtainCreature = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), bioCreatureMat);
+  bioCurtainCreature.renderOrder = 5;
+  scene.add(bioCurtainCreature);
 }
 
 function makeRectFrustum(w0, d0, w1, d1, h) {
@@ -1353,8 +1369,16 @@ function placeBioProjector() {
     bioCreaturePatch.position.copy(end).addScaledVector(hit.normal, 0.02);
     bioCreaturePatch.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hit.normal);
     bioCreaturePatch.scale.setScalar(patchR);
-    applyCreatureUniforms();
   }
+  if (bioCurtainCreature && curtainMesh) {
+    bioCurtainCreature.visible = params.criaturas > 0.004;
+    bioCurtainCreature.position.copy(curtainMesh.position);
+    bioCurtainCreature.rotation.copy(curtainMesh.rotation);
+    bioCurtainCreature.scale.set(params.bioAncho * 0.98, params.bioAlto * 0.98, 1);
+    const n = new THREE.Vector3(0, 0, 1).applyQuaternion(curtainMesh.quaternion);
+    bioCurtainCreature.position.addScaledVector(n, 0.035);
+  }
+  applyCreatureUniforms();
 }
 
 function buildCurtain() {
@@ -1376,8 +1400,10 @@ function buildCurtain() {
       uBioSeed: { value: params.bioSeed },
       uFabric: { value: new THREE.Color(params.bioColor) },
       uGlow: { value: new THREE.Color(0xc8d4e0) },
+      uOpacity: { value: params.bioOpacity },
     },
     transparent: true,
+    depthWrite: params.bioOpacity > 0.82,
     side: THREE.DoubleSide,
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -1424,7 +1450,7 @@ function buildCurtain() {
     `,
     fragmentShader: /* glsl */ `
       varying vec2 vUv;
-      uniform float uTime, uFreq, uLight, uCreatures, uBass, uBioFreq, uBioSpeed, uBioSeed;
+      uniform float uTime, uFreq, uLight, uCreatures, uBass, uBioFreq, uBioSpeed, uBioSeed, uOpacity;
       uniform vec3 uFabric, uGlow;
 
       float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -1445,7 +1471,7 @@ function buildCurtain() {
         float grain = fbm(uv * (1.8 + uBioFreq * 0.2) + vec2(uTime * 0.02, uBioSeed * 0.01));
         vec3 col = mix(uFabric, uFabric * 0.55, grain * 0.35);
         col = mix(col, uGlow, uLight * 0.04);
-        gl_FragColor = vec4(col, 0.52);
+        gl_FragColor = vec4(col, clamp(uOpacity, 0.0, 1.0));
       }
     `,
   });
@@ -1471,6 +1497,8 @@ function applyCurtain() {
     u.uBioSpeed.value = params.bioSpeed;
     u.uBioSeed.value = params.bioSeed;
     u.uFabric.value.set(params.bioColor);
+    u.uOpacity.value = params.bioOpacity;
+    curtainMat.depthWrite = params.bioOpacity > 0.82;
   }
   applyCreatureUniforms();
   placeBioProjector();
@@ -1629,35 +1657,36 @@ function buildGui() {
     placeBioProjector();
   });
   bio.addColor(params, "bioColor").name("color").onChange(applyCurtain);
-  bio.add(params, "bioX", -4, 4, 0.01).name("x").onChange(applyCurtain);
-  bio.add(params, "bioY", 0.2, 3.8, 0.01).name("y").onChange(applyCurtain);
-  bio.add(params, "bioZ", -3.2, 2.5, 0.01).name("z").onChange(applyCurtain);
-  bio.add(params, "bioRotX", -80, 80, 1).name("rot x").onChange(applyCurtain);
-  bio.add(params, "bioRotY", -180, 180, 1).name("rot y").onChange(applyCurtain);
-  bio.add(params, "bioRotZ", -80, 80, 1).name("rot z").onChange(applyCurtain);
-  bio.add(params, "bioAncho", 0.6, 8, 0.05).name("ancho").onChange(applyCurtain);
-  bio.add(params, "bioAlto", 0.6, 6, 0.05).name("alto").onChange(applyCurtain);
-  bio.add(params, "bioAmp", 0, 0.85, 0.01).name("perlin amp").onChange(applyCurtain);
+  bio.add(params, "bioOpacity", 0, 1, 0.01).name("opacidad").onChange(applyCurtain);
+  bio.add(params, "bioX", -8, 8, 0.01).name("x").onChange(applyCurtain);
+  bio.add(params, "bioY", -4, 6, 0.01).name("y").onChange(applyCurtain);
+  bio.add(params, "bioZ", -8, 8, 0.01).name("z").onChange(applyCurtain);
+  bio.add(params, "bioRotX", -360, 360, 1).name("rot x").onChange(applyCurtain);
+  bio.add(params, "bioRotY", -360, 360, 1).name("rot y").onChange(applyCurtain);
+  bio.add(params, "bioRotZ", -360, 360, 1).name("rot z").onChange(applyCurtain);
+  bio.add(params, "bioAncho", 0.4, 16, 0.05).name("ancho").onChange(applyCurtain);
+  bio.add(params, "bioAlto", 0.4, 16, 0.05).name("alto").onChange(applyCurtain);
+  bio.add(params, "bioAmp", 0, 1.2, 0.01).name("perlin amp").onChange(applyCurtain);
   bio.add(params, "bioFreq", 0.2, 8, 0.05).name("perlin freq").onChange(applyCurtain);
   bio.add(params, "bioOctaves", 1, 6, 1).name("octavas").onChange(applyCurtain);
   // bio.add(params, "bioSpeed", 0, 1.5, 0.01).name("perlin vel").onChange(applyCurtain);
   bio.add(params, "bioSeed", 0, 99, 1).name("semilla").onChange(applyCurtain);
   const bioProy = gui.addFolder("bio material proyector");
-  bioProy.add(params, "bioProyX", -3.2, 3.2, 0.01).name("x").onChange(placeBioProjector);
-  bioProy.add(params, "bioProyY", 0.4, 4.0, 0.01).name("y").onChange(placeBioProjector);
-  bioProy.add(params, "bioProyZ", -3.0, 2.6, 0.01).name("z").onChange(placeBioProjector);
-  bioProy.add(params, "bioProyRotX", -180, 180, 1).name("rot x").onChange(placeBioProjector);
-  bioProy.add(params, "bioProyRotY", -180, 180, 1).name("rot y").onChange(placeBioProjector);
-  bioProy.add(params, "bioProyRotZ", -180, 180, 1).name("rot z").onChange(placeBioProjector);
-  bioProy.add(params, "bioProyRadio", 0.2, 6, 0.01).name("radio cono").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyX", -8, 8, 0.01).name("x").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyY", -4, 8, 0.01).name("y").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyZ", -8, 8, 0.01).name("z").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRotX", -360, 360, 1).name("rot x").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRotY", -360, 360, 1).name("rot y").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRotZ", -360, 360, 1).name("rot z").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRadio", 0.1, 16, 0.01).name("radio cono").onChange(placeBioProjector);
   bioProy.add(params, "bioProyCaustica").name("cáusticas agua").onChange(placeBioProjector);
   const lamp = gui.addFolder("lámpara");
   lamp.add(params, "proyector", { Arriba: "arriba", Abajo: "abajo" })
     .name("lado")
     .onChange(placeProjector);
-  lamp.add(params, "lamparaX", -1.8, 1.8, 0.01).name("x").onChange(placeProjector);
-  lamp.add(params, "lamparaZ", -1.8, 1.8, 0.01).name("z").onChange(placeProjector);
-  lamp.add(params, "lamparaY", -1.0, 1.0, 0.01).name("altura").onChange(placeProjector);
+  lamp.add(params, "lamparaX", -4, 4, 0.01).name("x").onChange(placeProjector);
+  lamp.add(params, "lamparaZ", -4, 4, 0.01).name("z").onChange(placeProjector);
+  lamp.add(params, "lamparaY", -3, 3, 0.01).name("altura").onChange(placeProjector);
   gui.add(params, "audio").name("audio cuadrafónico").onChange((on) => {
     if (on) startAudio();
     else stopAudio();
@@ -1764,6 +1793,7 @@ function animate() {
       m.uniforms.uBioSpeed.value = params.bioSpeed;
       m.uniforms.uBioSeed.value = params.bioSeed;
     }
+    if (m.uniforms.uOpacity) m.uniforms.uOpacity.value = params.bioOpacity;
   }
   if (bioCreatureMat?.uniforms) {
     bioCreatureMat.uniforms.uTime.value = t;
