@@ -62,7 +62,7 @@ const params = {
 };
 
 const START_CAMERA = {
-  position: [-3.070255356185929, 1.8191879459827465, -10.791863732998188],
+  position: [6.345591817352278, 7.038815620292524, 12.849280368497373],
   target: [0, 1.45, 0],
 };
 
@@ -283,6 +283,22 @@ function init() {
   controls.maxPolarAngle = Math.PI * 0.49;
   controls.minDistance = 1.4;
   controls.maxDistance = 18;
+  let camLogAt = 0;
+  const logCamera = () => {
+    const view = {
+      position: camera.position.toArray(),
+      target: controls.target.toArray(),
+    };
+    console.log("camera", view);
+  };
+  controls.addEventListener("change", () => {
+    const now = performance.now();
+    if (now - camLogAt < 200) return;
+    camLogAt = now;
+    logCamera();
+  });
+  controls.addEventListener("end", logCamera);
+  logCamera();
 
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envScene = new THREE.Scene();
