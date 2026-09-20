@@ -20,6 +20,8 @@ const params = {
   luz: 0.72,
   radioReflejo: 0.55,
   vasoY: 2.25,
+  vasoX: 0,
+  vasoZ: 0,
   vasoAmp: 0,
   vasoFreq: 2.4,
   vasoOctaves: 3,
@@ -47,6 +49,10 @@ const params = {
   bioSpeed: 0,
   bioSeed: 17,
   bioColor: "#2a2e32",
+  bioProyX: 0,
+  bioProyY: 3.72,
+  bioProyZ: -1.15,
+  bioProyCaustica: true,
 };
 
 let renderer, scene, camera, controls, clock, gui;
@@ -57,6 +63,8 @@ let audio = null;
 let hemi, keyLight, fillLight, rimLight;
 let waterNormals = null;
 let projectorGroup, projectorSpot, beamMesh, transducer;
+let bioProjectorGroup, bioProjectorSpot, bioBeamMesh;
+let bioCausticMat, bioCausticPatch, bioCurtainCausticMat, bioCurtainCaustic;
 let rimMat = null;
 let vesselGeos = [];
 
@@ -154,12 +162,14 @@ function init() {
   buildTransducer();
   buildCausticPatch();
   buildProjector();
+  buildBioProjector();
   buildCurtain();
   buildSpeakers();
   buildLights();
   applyRoomTemp();
   applyRadius();
   placeProjector();
+  placeBioProjector();
   buildGui();
 
   addEventListener("resize", onResize);
@@ -209,16 +219,18 @@ function loadWaterNormals() {
 
 function applyBeamColor() {
   const c = tmpColor.set(params.sunColor);
-  if (beamMesh?.material?.uniforms?.uColor) {
-    beamMesh.material.uniforms.uColor.value.copy(c);
-  }
-  if (projectorSpot) projectorSpot.color.copy(c);
-  projectorGroup?.traverse((o) => {
-    if (o.material?.emissive) {
-      o.material.emissive.copy(c);
-      o.material.emissiveIntensity = 0.9;
-    }
-  });
+  const tint = (beam, group, spot) => {
+    if (beam?.material?.uniforms?.uColor) beam.material.uniforms.uColor.value.copy(c);
+    if (spot) spot.color.copy(c);
+    group?.traverse((o) => {
+      if (o.material?.emissive) {
+        o.material.emissive.copy(c);
+        o.material.emissiveIntensity = 0.9;
+      }
+    });
+  };
+  tint(beamMesh, projectorGroup, projectorSpot);
+  tint(bioBeamMesh, bioProjectorGroup, bioProjectorSpot);
 }
 
 function applyWaterUniforms() {
@@ -236,6 +248,7 @@ function applyWaterUniforms() {
   applyBeamColor();
   updateCausticUniforms();
   if (projectorGroup) placeProjector();
+  if (bioProjectorGroup) placeBioProjector();
 }
 
 function cable(from, to) {
@@ -400,17 +413,20 @@ function applyVesselDeform(t = clock?.elapsedTime ?? 0) {
     if (item.mode === "wall") item.geo.computeVertexNormals();
   }
   if (causticMat?.uniforms) {
-    const u = causticMat.uniforms;
-    if (u.uVasoAmp) u.uVasoAmp.value = params.vasoAmp;
-    if (u.uVasoFreq) u.uVasoFreq.value = params.vasoFreq;
-    if (u.uVasoOctaves) u.uVasoOctaves.value = params.vasoOctaves;
-    if (u.uVasoSpeed) u.uVasoSpeed.value = params.vasoSpeed;
-    if (u.uVasoSeed) u.uVasoSeed.value = params.vasoSeed;
-    if (u.uVasoTime) u.uVasoTime.value = t;
+    const mats = [causticMat, bioCausticMat, bioCurtainCausticMat].filter(Boolean);
+    for (const mat of mats) {
+      const u = mat.uniforms;
+      if (u.uVasoAmp) u.uVasoAmp.value = params.vasoAmp;
+      if (u.uVasoFreq) u.uVasoFreq.value = params.vasoFreq;
+      if (u.uVasoOctaves) u.uVasoOctaves.value = params.vasoOctaves;
+      if (u.uVasoSpeed) u.uVasoSpeed.value = params.vasoSpeed;
+      if (u.uVasoSeed) u.uVasoSeed.value = params.vasoSeed;
+      if (u.uVasoTime) u.uVasoTime.value = t;
+    }
   }
 }
 
- function waterOpts() {
+function waterOpts() {
   return {
     textureWidth: 512,
     textureHeight: 512,
@@ -479,7 +495,7 @@ function buildVessel() {
   applyVesselDeform(0);
 
   vesselDisk.add(vesselBody);
-  vesselDisk.position.set(0, params.vasoY, 0);
+  vesselDisk.position.set(params.vasoX, params.vasoY, params.vasoZ);
   scene.add(vesselDisk);
   buildCables();
 }
@@ -596,6 +612,7 @@ function buildCausticPatch() {
       uVesselHalf: { value: new THREE.Vector2(params.radio, params.radio) },
       uFootprintHalf: { value: new THREE.Vector2(params.radioReflejo, params.radioReflejo) },
       uPatchCenter: { value: new THREE.Vector2(0, 0) },
+      uVesselCenter: { value: new THREE.Vector2(0, 0) },
       uLampPos: { value: new THREE.Vector3(0, 3.9, 0) },
       uWaterColor: { value: new THREE.Color(params.colorAgua) },
       uSunColor: { value: new THREE.Color(params.sunColor) },
@@ -619,7 +636,7 @@ function buildCausticPatch() {
       uniform sampler2D normalSampler;
       uniform float uTime, uSize, uDistortion, uLight, uNoise, uRect, uAlpha, uThrow, uWaterY;
       uniform float uVasoAmp, uVasoFreq, uVasoOctaves, uVasoSpeed, uVasoSeed, uVasoTime;
-      uniform vec2 uVesselHalf, uFootprintHalf, uPatchCenter;
+      uniform vec2 uVesselHalf, uFootprintHalf, uPatchCenter, uVesselCenter;
       uniform vec3 uLampPos, uWaterColor, uSunColor, uGlow;
 
       vec4 getNoise(vec2 uv) {
@@ -674,7 +691,7 @@ function buildCausticPatch() {
       }
 
       float vesselMask(vec2 worldXZ) {
-        vec2 p = worldXZ / max(uVesselHalf, vec2(0.0001));
+        vec2 p = (worldXZ - uVesselCenter) / max(uVesselHalf, vec2(0.0001));
         p /= vesselWarp(p);
         float maskCirc = 1.0 - smoothstep(0.82, 1.12, length(p));
         vec2 b = abs(p);
@@ -749,9 +766,8 @@ function buildCausticPatch() {
   scene.add(causticPatch);
 }
 
-function updateCausticUniforms() {
-  if (!causticMat?.uniforms) return;
-  const u = causticMat.uniforms;
+function syncCausticShared(u) {
+  if (!u) return;
   if (waterDisk?.material?.uniforms?.time) {
     u.uTime.value = waterDisk.material.uniforms.time.value;
   }
@@ -764,10 +780,7 @@ function updateCausticUniforms() {
   u.uWaterColor.value.set(params.colorAgua);
   u.uSunColor.value.set(params.sunColor);
   u.uVesselHalf.value.set(params.radio, isRect() ? params.largo : params.radio);
-  u.uFootprintHalf.value.set(
-    params.radioReflejo,
-    isRect() ? params.radioReflejo * (params.largo / Math.max(params.radio, 0.001)) : params.radioReflejo
-  );
+  if (u.uVesselCenter) u.uVesselCenter.value.set(params.vasoX, params.vasoZ);
   u.uVasoAmp.value = params.vasoAmp;
   u.uVasoFreq.value = params.vasoFreq;
   u.uVasoOctaves.value = params.vasoOctaves;
@@ -778,8 +791,54 @@ function updateCausticUniforms() {
   if (u.normalSampler) u.normalSampler.value = loadWaterNormals();
 }
 
-function buildProjector() {
-  projectorGroup = new THREE.Group();
+function updateCausticUniforms() {
+  if (!causticMat?.uniforms) return;
+  syncCausticShared(causticMat.uniforms);
+  causticMat.uniforms.uFootprintHalf.value.set(
+    params.radioReflejo,
+    isRect() ? params.radioReflejo * (params.largo / Math.max(params.radio, 0.001)) : params.radioReflejo
+  );
+  syncCausticShared(bioCausticMat?.uniforms);
+  syncCausticShared(bioCurtainCausticMat?.uniforms);
+}
+
+function makeBeamMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uColor: { value: new THREE.Color(params.sunColor) },
+      uGain: { value: 0.22 },
+    },
+    toneMapped: false,
+    vertexShader: /* glsl */ `
+      varying float vY;
+      varying vec2 vUv;
+      void main() {
+        vY = uv.y;
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying float vY;
+      varying vec2 vUv;
+      uniform vec3 uColor;
+      uniform float uGain;
+      void main() {
+        float edge = 1.0 - abs(vUv.x - 0.5) * 2.0;
+        float a = uGain * pow(max(edge, 0.0), 1.15) * (0.18 + vY * 0.85);
+        vec3 col = uColor * a * 2.4;
+        gl_FragColor = vec4(col, a);
+      }
+    `,
+  });
+}
+
+function makeProjectorHousing() {
+  const group = new THREE.Group();
   const body = new THREE.Mesh(
     new THREE.BoxGeometry(0.16, 0.08, 0.22),
     new THREE.MeshStandardMaterial({ color: 0x1c1e22, roughness: 0.45, metalness: 0.3 })
@@ -796,50 +855,41 @@ function buildProjector() {
   );
   lens.rotation.x = Math.PI / 2;
   lens.position.z = -0.12;
-  projectorGroup.add(body, lens);
+  group.add(body, lens);
+  return group;
+}
+
+function buildProjector() {
+  projectorGroup = makeProjectorHousing();
   projectorSpot = new THREE.SpotLight(0xeaf2ff, 40, 8, Math.PI / 9, 0.45, 1.4);
   projectorSpot.castShadow = true;
   scene.add(projectorSpot);
   scene.add(projectorSpot.target);
-
-  const beamGeo = new THREE.CylinderGeometry(0.03, 1, 1, 32, 1, true);
-  beamMesh = new THREE.Mesh(
-    beamGeo,
-    new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uColor: { value: new THREE.Color(params.sunColor) },
-        uGain: { value: 0.22 },
-      },
-      toneMapped: false,
-      vertexShader: /* glsl */ `
-        varying float vY;
-        varying vec2 vUv;
-        void main() {
-          vY = uv.y;
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        varying float vY;
-        varying vec2 vUv;
-        uniform vec3 uColor;
-        uniform float uGain;
-        void main() {
-          float edge = 1.0 - abs(vUv.x - 0.5) * 2.0;
-          float a = uGain * pow(max(edge, 0.0), 1.15) * (0.18 + vY * 0.85);
-          vec3 col = uColor * a * 2.4;
-          gl_FragColor = vec4(col, a);
-        }
-      `,
-    })
-  );
+  beamMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 1, 1, 32, 1, true), makeBeamMaterial());
   scene.add(projectorGroup);
   scene.add(beamMesh);
+}
+
+function buildBioProjector() {
+  bioProjectorGroup = makeProjectorHousing();
+  bioProjectorSpot = new THREE.SpotLight(0xeaf2ff, 28, 8, Math.PI / 8, 0.5, 1.3);
+  scene.add(bioProjectorSpot);
+  scene.add(bioProjectorSpot.target);
+  bioBeamMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 1, 1, 32, 1, true), makeBeamMaterial());
+  scene.add(bioProjectorGroup);
+  scene.add(bioBeamMesh);
+
+  if (causticMat) {
+    bioCausticMat = causticMat.clone();
+    bioCurtainCausticMat = causticMat.clone();
+    bioCausticPatch = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bioCausticMat);
+    bioCausticPatch.rotation.x = -Math.PI / 2;
+    bioCausticPatch.renderOrder = 1;
+    scene.add(bioCausticPatch);
+    bioCurtainCaustic = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), bioCurtainCausticMat);
+    bioCurtainCaustic.renderOrder = 3;
+    scene.add(bioCurtainCaustic);
+  }
 }
 
 function makeRectFrustum(w0, d0, w1, d1, h) {
@@ -900,8 +950,8 @@ function placeProjector() {
   const lz = params.lamparaZ;
   const denom = waterY - y0;
   const t = Math.abs(denom) < 0.05 ? 1 : (y1 - y0) / denom;
-  const hitX = lx + t * (0 - lx);
-  const hitZ = lz + t * (0 - lz);
+  const hitX = lx + t * (params.vasoX - lx);
+  const hitZ = lz + t * (params.vasoZ - lz);
 
   const start = new THREE.Vector3(lx, y0, lz);
   const end = new THREE.Vector3(hitX, y1, hitZ);
@@ -949,7 +999,11 @@ function placeProjector() {
     causticMat.uniforms.uFootprintHalf.value.set(footW, footD);
     causticMat.uniforms.uPatchCenter.value.set(hitX, hitZ);
     causticMat.uniforms.uWaterY.value = waterY;
+    if (causticMat.uniforms.uVesselCenter) {
+      causticMat.uniforms.uVesselCenter.value.set(params.vasoX, params.vasoZ);
+    }
   }
+  placeBioProjector();
 }
 
 function applyRadius() {
@@ -962,10 +1016,90 @@ function applyRadius() {
   applyWaterUniforms();
 }
 
-function applyVesselHeight() {
-  if (vesselDisk) vesselDisk.position.y = params.vasoY;
+function applyVesselPose() {
+  if (vesselDisk) vesselDisk.position.set(params.vasoX, params.vasoY, params.vasoZ);
   buildCables();
   placeProjector();
+}
+
+function placeBioProjector() {
+  if (!bioProjectorGroup || !bioBeamMesh || !bioProjectorSpot) return;
+  const floorY = 0.018;
+  const start = new THREE.Vector3(params.bioProyX, params.bioProyY, params.bioProyZ);
+  const end = new THREE.Vector3(params.bioProyX, floorY, params.bioProyZ);
+  const dir = end.clone().sub(start);
+  const h = Math.max(dir.length(), 0.2);
+  const mid = start.clone().add(end).multiplyScalar(0.5);
+  const along = new THREE.Vector3(0, -1, 0);
+  const waterY = params.vasoY;
+  const throwDist = Math.max(Math.abs(end.y - waterY), 0.12);
+  const spread = Math.min(1.85, throwDist * params.distortion * 0.05);
+  const throwScale = THREE.MathUtils.clamp(throwDist / 2.23, 0.22, 3.4);
+  const footW = params.radioReflejo * throwScale;
+  const footD = (isRect()
+    ? params.radioReflejo * (params.largo / Math.max(params.radio, 0.001))
+    : params.radioReflejo) * throwScale;
+  const patchW = Math.max(params.radio * 1.08 * throwScale + spread, footW * 1.15);
+  const patchD = Math.max((isRect() ? params.largo : params.radio) * 1.08 * throwScale + spread, footD * 1.15);
+  const patchR = Math.max(patchW, patchD);
+  const rNear = 0.035;
+
+  bioBeamMesh.geometry.dispose();
+  bioBeamMesh.geometry = new THREE.CylinderGeometry(patchR, rNear, h, 32, 1, true);
+  bioBeamMesh.position.copy(mid);
+  bioBeamMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), along);
+  if (bioBeamMesh.material.uniforms?.uGain) {
+    bioBeamMesh.material.uniforms.uGain.value = 0.1 + params.luz * 0.22;
+  }
+
+  bioProjectorGroup.position.copy(start);
+  bioProjectorGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), along);
+  bioProjectorSpot.position.copy(start);
+  bioProjectorSpot.target.position.copy(end);
+  bioProjectorSpot.distance = h + 0.8;
+  bioProjectorSpot.angle = Math.atan(patchR / Math.max(0.5, h)) * 1.15;
+  bioProjectorSpot.intensity = params.bioProyCaustica ? 10 + params.luz * 28 : 22 + params.luz * 40;
+  applyBeamColor();
+
+  const showCaustics = params.bioProyCaustica;
+  if (bioCausticPatch) {
+    bioCausticPatch.visible = showCaustics;
+    bioCausticPatch.position.set(params.bioProyX, floorY, params.bioProyZ);
+    bioCausticPatch.rotation.x = -Math.PI / 2;
+    bioCausticPatch.scale.set(patchW, 1, patchD);
+  }
+  if (bioCurtainCaustic && curtainMesh) {
+    bioCurtainCaustic.visible = showCaustics;
+    bioCurtainCaustic.position.copy(curtainMesh.position);
+    bioCurtainCaustic.rotation.copy(curtainMesh.rotation);
+    bioCurtainCaustic.scale.set(params.bioAncho * 0.98, params.bioAlto * 0.98, 1);
+    const n = new THREE.Vector3(0, 0, 1).applyQuaternion(curtainMesh.quaternion);
+    bioCurtainCaustic.position.addScaledVector(n, 0.03);
+  }
+  const lampHit = new THREE.Vector2(params.bioProyX, params.bioProyZ);
+  if (bioCausticMat?.uniforms) {
+    const u = bioCausticMat.uniforms;
+    u.uThrow.value = throwDist;
+    u.uLampPos.value.copy(start);
+    u.uRect.value = isRect() ? 1 : 0;
+    u.uVesselHalf.value.set(params.radio, isRect() ? params.largo : params.radio);
+    u.uVesselCenter.value.set(params.vasoX, params.vasoZ);
+    u.uFootprintHalf.value.set(footW, footD);
+    u.uPatchCenter.value.copy(lampHit);
+    u.uWaterY.value = waterY;
+  }
+  if (bioCurtainCausticMat?.uniforms) {
+    const u = bioCurtainCausticMat.uniforms;
+    u.uThrow.value = throwDist;
+    u.uLampPos.value.copy(start);
+    u.uRect.value = isRect() ? 1 : 0;
+    u.uVesselHalf.value.set(params.radio, isRect() ? params.largo : params.radio);
+    u.uVesselCenter.value.set(params.vasoX, params.vasoZ);
+    u.uFootprintHalf.value.set(8, 8);
+    u.uPatchCenter.value.set(params.bioX, params.bioZ);
+    u.uWaterY.value = waterY;
+    u.uLight.value = params.luz * 1.15;
+  }
 }
 
 function buildCurtain() {
@@ -1084,15 +1218,17 @@ function applyCurtain() {
     THREE.MathUtils.degToRad(params.bioRotY),
     THREE.MathUtils.degToRad(params.bioRotZ)
   );
-  if (!curtainMat?.uniforms) return;
-  const u = curtainMat.uniforms;
-  u.uBioAmp.value = params.bioAmp;
-  u.uBioFreq.value = params.bioFreq;
-  u.uBioOctaves.value = params.bioOctaves;
-  u.uBioSpeed.value = params.bioSpeed;
-  u.uBioSeed.value = params.bioSeed;
-  u.uCreatures.value = params.criaturas;
-  u.uFabric.value.set(params.bioColor);
+  if (curtainMat?.uniforms) {
+    const u = curtainMat.uniforms;
+    u.uBioAmp.value = params.bioAmp;
+    u.uBioFreq.value = params.bioFreq;
+    u.uBioOctaves.value = params.bioOctaves;
+    u.uBioSpeed.value = params.bioSpeed;
+    u.uBioSeed.value = params.bioSeed;
+    u.uCreatures.value = params.criaturas;
+    u.uFabric.value.set(params.bioColor);
+  }
+  placeBioProjector();
 }
 
 function buildSpeakers() {
@@ -1180,6 +1316,7 @@ function applyState(data) {
   rebuildVessel();
   applyRoomTemp();
   applyCurtain();
+  applyVesselPose();
   placeProjector();
   applyWaterUniforms();
   if (params.audio) startAudio();
@@ -1220,7 +1357,9 @@ function buildGui() {
     .onChange(rebuildVessel);
   rec.add(params, "radio", 0.25, 1.2, 0.01).name("radio / ancho").onChange(applyRadius);
   rec.add(params, "largo", 0.2, 1.2, 0.01).name("largo (rect)").onChange(applyRadius);
-  rec.add(params, "vasoY", 0.4, 3.7, 0.01).name("altura").onChange(applyVesselHeight);
+  rec.add(params, "vasoX", -2.2, 2.2, 0.01).name("x").onChange(applyVesselPose);
+  rec.add(params, "vasoY", 0.4, 3.7, 0.01).name("altura").onChange(applyVesselPose);
+  rec.add(params, "vasoZ", -2.4, 2.4, 0.01).name("z").onChange(applyVesselPose);
   rec.add(params, "vasoAmp", 0, 0.55, 0.01).name("perlin amp").onChange(() => applyVesselDeform());
   rec.add(params, "vasoFreq", 0.2, 8, 0.05).name("perlin freq").onChange(() => applyVesselDeform());
   rec.add(params, "vasoOctaves", 1, 6, 1).name("octavas").onChange(() => applyVesselDeform());
@@ -1254,6 +1393,11 @@ function buildGui() {
   bio.add(params, "bioOctaves", 1, 6, 1).name("octavas").onChange(applyCurtain);
   // bio.add(params, "bioSpeed", 0, 1.5, 0.01).name("perlin vel").onChange(applyCurtain);
   bio.add(params, "bioSeed", 0, 99, 1).name("semilla").onChange(applyCurtain);
+  const bioProy = gui.addFolder("bio material proyector");
+  bioProy.add(params, "bioProyX", -3.2, 3.2, 0.01).name("x").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyY", 0.4, 4.0, 0.01).name("y").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyZ", -3.0, 2.6, 0.01).name("z").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyCaustica").name("cáusticas agua").onChange(placeBioProjector);
   const lamp = gui.addFolder("lámpara");
   lamp.add(params, "proyector", { Arriba: "arriba", Abajo: "abajo" })
     .name("lado")
@@ -1376,7 +1520,7 @@ function animate() {
   if (rimLight) rimLight.intensity = 1.2 + params.luz * 2.2;
 
   applyVesselDeform(t);
-  if (vesselDisk) vesselDisk.position.y = params.vasoY;
+  if (vesselDisk) vesselDisk.position.set(params.vasoX, params.vasoY, params.vasoZ);
 
   if (transducer) {
     transducer.scale.setScalar(1.2 * (1 + rumble.value * 0.04));
