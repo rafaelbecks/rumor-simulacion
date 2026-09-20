@@ -33,7 +33,8 @@ const params = {
   lamparaX: 0,
   lamparaZ: 0,
   lamparaY: 0,
-  temperatura: 5200,
+  temperatura: 9000,
+  estado: 0,
   audio: false,
   bioX: 0,
   bioY: 1.7,
@@ -55,7 +56,41 @@ const params = {
   bioProyRotX: -90,
   bioProyRotY: 0,
   bioProyRotZ: 0,
+  bioProyRadio: 1.35,
   bioProyCaustica: true,
+};
+
+// Edit umbral → inmersión here. Keys in both states are interpolated.
+const STATE_INITIAL = {
+  temperatura: 9000,
+  luz: 0.55,
+  criaturas: 0.05,
+  volume: 0,
+};
+
+const STATE_FINAL = {
+  temperatura: 2700,
+  luz: 0.95,
+  criaturas: 1,
+  volume: 1,
+};
+
+// type: linear | easeIn | easeOut | easeInOut | smoothstep | smootherstep
+const STATE_CURVES = {
+  master: { type: "smoothstep", power: 1 },
+  temperatura: { type: "easeInOut", power: 1.7 },
+  luz: { type: "linear", power: 1 },
+  criaturas: { type: "easeOut", power: 1.45 },
+  volume: { type: "easeIn", power: 2.35, delay: 0.06 },
+};
+
+const SOUND = {
+  src: "./sonido-simulacion-soterrado.wav",
+  loop: true,
+  maxVolume: 0.85,
+  html5: true,
+  fadeMs: 1200,
+  volumeCurve: STATE_CURVES.volume,
 };
 
 let renderer, scene, camera, controls, clock, gui;
@@ -68,8 +103,11 @@ let waterNormals = null;
 let projectorGroup, projectorSpot, beamMesh, transducer;
 let bioProjectorGroup, bioProjectorSpot, bioBeamMesh;
 let bioCausticMat, bioCausticPatch, bioCurtainCausticMat, bioCurtainCaustic;
+let bioCreatureMat, bioCreaturePatch;
 let rimMat = null;
 let vesselGeos = [];
+let fieldHowl = null;
+let fieldVol = 0;
 
 const WATER_NORMALS_URL = "./textures/waternormals.jpg";
 
@@ -96,6 +134,89 @@ function kelvinToRGB(k) {
   );
 }
 
+function easeCurve(t, type = "linear", power = 1) {
+  t = THREE.MathUtils.clamp(t, 0, 1);
+  if (type === "smoothstep") return t * t * (3 - 2 * t);
+  if (type === "smootherstep") return t * t * t * (t * (t * 6 - 15) + 10);
+  if (type === "easeIn") return Math.pow(t, power);
+  if (type === "easeOut") return 1 - Math.pow(1 - t, power);
+  if (type === "easeInOut") {
+    return t < 0.5
+      ? 0.5 * Math.pow(2 * t, power)
+      : 1 - 0.5 * Math.pow(2 * (1 - t), power);
+  }
+  return t;
+}
+
+function channelT(t, curve = {}) {
+  const delay = curve.delay || 0;
+  const span = Math.max(1e-4, 1 - delay);
+  const u = THREE.MathUtils.clamp((t - delay) / span, 0, 1);
+  return easeCurve(u, curve.type || "linear", curve.power ?? 1);
+}
+
+function mixValue(a, b, u) {
+  if (typeof a === "number" && typeof b === "number") return a + (b - a) * u;
+  return u < 1 ? a : b;
+}
+
+function applyEstadoMix() {
+  const master = channelT(params.estado, STATE_CURVES.master);
+  for (const key of Object.keys(STATE_INITIAL)) {
+    if (key === "volume" || !(key in STATE_FINAL)) continue;
+    const u = channelT(master, STATE_CURVES[key] || STATE_CURVES.master);
+    params[key] = mixValue(STATE_INITIAL[key], STATE_FINAL[key], u);
+  }
+  params.sunColor = `#${kelvinToRGB(params.temperatura).getHexString()}`;
+  const volU = channelT(master, STATE_CURVES.volume || SOUND.volumeCurve);
+  const vol = mixValue(STATE_INITIAL.volume ?? 0, STATE_FINAL.volume ?? 1, volU);
+  if (scene) {
+    applyRoomTemp();
+    applyCurtain();
+    applyCreatureUniforms();
+    placeProjector();
+    placeBioProjector();
+  }
+  syncFieldSound(vol);
+  gui?.controllersRecursive?.().forEach((c) => c.updateDisplay());
+}
+
+function ensureFieldSound() {
+  const HowlCtor = window.Howl;
+  if (fieldHowl || typeof HowlCtor !== "function") return;
+  fieldHowl = new HowlCtor({
+    src: [SOUND.src],
+    loop: SOUND.loop,
+    volume: 0,
+    html5: SOUND.html5,
+    preload: true,
+  });
+}
+
+function syncFieldSound(vol) {
+  ensureFieldSound();
+  if (!fieldHowl) return;
+  const v = Math.max(0, vol) * SOUND.maxVolume;
+  if (v > 0.002 && !fieldHowl.playing()) fieldHowl.play();
+  fieldHowl.volume(v);
+  fieldVol = v;
+}
+
+function buildStateFader() {
+  const el = document.getElementById("estado-range");
+  if (!el) return;
+  el.value = String(params.estado);
+  el.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    unlockAudio();
+  });
+  el.addEventListener("input", () => {
+    params.estado = parseFloat(el.value);
+    unlockAudio();
+    applyEstadoMix();
+  });
+}
+
 function applyRoomTemp() {
   const c = kelvinToRGB(params.temperatura);
   const cool = params.temperatura / 6500;
@@ -117,6 +238,7 @@ function applyRoomTemp() {
   }
   if (causticMat?.uniforms.uGlow) causticMat.uniforms.uGlow.value.copy(c);
   if (curtainMat?.uniforms.uGlow) curtainMat.uniforms.uGlow.value.copy(c);
+  if (bioCreatureMat?.uniforms?.uGlow) bioCreatureMat.uniforms.uGlow.value.copy(c);
   applyWaterUniforms();
 }
 
@@ -174,6 +296,8 @@ function init() {
   placeProjector();
   placeBioProjector();
   buildGui();
+  buildStateFader();
+  applyEstadoMix();
 
   addEventListener("resize", onResize);
   addEventListener("pointerdown", unlockAudio, { once: true });
@@ -805,6 +929,76 @@ function updateCausticUniforms() {
   syncCausticShared(bioCurtainCausticMat?.uniforms);
 }
 
+function makeCreatureMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+    uniforms: {
+      uTime: { value: 0 },
+      uFreq: { value: params.frecuencia },
+      uLight: { value: params.luz },
+      uCreatures: { value: params.criaturas },
+      uBioFreq: { value: params.bioFreq },
+      uBioSeed: { value: params.bioSeed },
+      uGlow: { value: new THREE.Color(0xc8d4e0) },
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec2 vUv;
+      uniform float uTime, uFreq, uLight, uCreatures, uBioFreq, uBioSeed;
+      uniform vec3 uGlow;
+
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float noise(vec2 p){
+        vec2 i = floor(p); vec2 f = fract(p);
+        float a = hash(i), b = hash(i+vec2(1,0)), c = hash(i+vec2(0,1)), d = hash(i+vec2(1,1));
+        vec2 u = f*f*(3.0-2.0*f);
+        return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+      }
+      float fbm(vec2 p){
+        float v = 0.0; float a = 0.5;
+        for(int i=0;i<5;i++){ v += a * noise(p); p *= 2.05; a *= 0.55; }
+        return v;
+      }
+
+      void main() {
+        vec2 uv = vUv;
+        vec2 p = uv * 2.0 - 1.0;
+        float disc = 1.0 - smoothstep(0.52, 1.0, length(p));
+        if (disc < 0.004 || uCreatures < 0.004) discard;
+        float t = uTime * 0.07 + uBioSeed * 0.01;
+        float field = fbm(uv * (2.4 + uBioFreq * 0.4) + vec2(t, uFreq * 0.002));
+        float filaments = abs(sin(uv.x * 9.0 + field * 4.0 + t * 2.0));
+        float spheres = smoothstep(0.18, 0.05, length(vec2(p.x + 0.25 * sin(t), p.y * 0.7 - 0.1) ) - 0.12 * field);
+        float tent = smoothstep(0.22, 0.02, abs(p.x - 0.35 * sin(p.y * 6.0 + t + field)));
+        float creature = max(spheres, max(1.0 - filaments, tent));
+        creature = smoothstep(0.35, 0.75, creature * field * 1.4) * uCreatures * disc;
+        vec3 col = uGlow * creature * (0.55 + uLight * 1.4);
+        gl_FragColor = vec4(col, creature);
+      }
+    `,
+  });
+}
+
+function applyCreatureUniforms() {
+  if (!bioCreatureMat?.uniforms) return;
+  const u = bioCreatureMat.uniforms;
+  u.uCreatures.value = params.criaturas;
+  u.uLight.value = params.luz;
+  u.uFreq.value = params.frecuencia;
+  u.uBioFreq.value = params.bioFreq;
+  u.uBioSeed.value = params.bioSeed;
+}
+
 function makeBeamMaterial() {
   return new THREE.ShaderMaterial({
     transparent: true,
@@ -893,6 +1087,11 @@ function buildBioProjector() {
     bioCurtainCaustic.renderOrder = 3;
     scene.add(bioCurtainCaustic);
   }
+
+  bioCreatureMat = makeCreatureMaterial();
+  bioCreaturePatch = new THREE.Mesh(new THREE.CircleGeometry(1, 64), bioCreatureMat);
+  bioCreaturePatch.renderOrder = 4;
+  scene.add(bioCreaturePatch);
 }
 
 function makeRectFrustum(w0, d0, w1, d1, h) {
@@ -1076,12 +1275,13 @@ function placeBioProjector() {
   const throwDist = Math.max(Math.abs(end.y - waterY), 0.12);
   const spread = Math.min(1.85, throwDist * params.distortion * 0.05);
   const throwScale = THREE.MathUtils.clamp(throwDist / 2.23, 0.22, 3.4);
+  const cone = params.bioProyRadio;
   const footW = params.radioReflejo * throwScale;
   const footD = (isRect()
     ? params.radioReflejo * (params.largo / Math.max(params.radio, 0.001))
     : params.radioReflejo) * throwScale;
-  const patchW = Math.max(params.radio * 1.08 * throwScale + spread, footW * 1.15);
-  const patchD = Math.max((isRect() ? params.largo : params.radio) * 1.08 * throwScale + spread, footD * 1.15);
+  const patchW = Math.max(params.radio * 1.08 * throwScale + spread, footW * 1.15) * cone;
+  const patchD = Math.max((isRect() ? params.largo : params.radio) * 1.08 * throwScale + spread, footD * 1.15) * cone;
   const patchR = Math.max(patchW, patchD);
   const rNear = 0.035;
 
@@ -1128,7 +1328,7 @@ function placeBioProjector() {
     u.uRect.value = isRect() ? 1 : 0;
     u.uVesselHalf.value.set(params.radio, isRect() ? params.largo : params.radio);
     u.uVesselCenter.value.set(params.vasoX, params.vasoZ);
-    u.uFootprintHalf.value.set(footW, footD);
+    u.uFootprintHalf.value.set(footW * params.bioProyRadio, footD * params.bioProyRadio);
     u.uPatchCenter.value.set(end.x, end.z);
     u.uWaterY.value = waterY;
   }
@@ -1143,6 +1343,13 @@ function placeBioProjector() {
     u.uPatchCenter.value.set(params.bioX, params.bioZ);
     u.uWaterY.value = waterY;
     u.uLight.value = params.luz * 1.15;
+  }
+  if (bioCreaturePatch) {
+    bioCreaturePatch.visible = params.criaturas > 0.004;
+    bioCreaturePatch.position.copy(end).addScaledVector(hit.normal, 0.02);
+    bioCreaturePatch.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hit.normal);
+    bioCreaturePatch.scale.setScalar(patchR);
+    applyCreatureUniforms();
   }
 }
 
@@ -1231,20 +1438,10 @@ function buildCurtain() {
 
       void main() {
         vec2 uv = vUv;
-        vec2 p = uv * 2.0 - 1.0;
-        float t = uTime * 0.07 + uBioSeed * 0.01;
-        float field = fbm(uv * (2.4 + uBioFreq * 0.4) + vec2(t, uFreq * 0.002));
-        float filaments = abs(sin(uv.x * 9.0 + field * 4.0 + t * 2.0));
-        float spheres = smoothstep(0.18, 0.05, length(vec2(p.x + 0.25 * sin(t), p.y * 0.7 - 0.1) ) - 0.12 * field);
-        float tent = smoothstep(0.22, 0.02, abs(p.x - 0.35 * sin(p.y * 6.0 + t + field)));
-        float creature = max(spheres, max(1.0 - filaments, tent));
-        creature = smoothstep(0.35, 0.75, creature * field * 1.4) * uCreatures;
-
-        vec3 shadow = uFabric * 0.25;
-        vec3 col = mix(uFabric, shadow, creature * (1.0 - uLight * 0.5));
-        col = mix(col, uGlow, creature * uLight * 0.35);
-        float alpha = 0.52 + creature * 0.28;
-        gl_FragColor = vec4(col, alpha);
+        float grain = fbm(uv * (1.8 + uBioFreq * 0.2) + vec2(uTime * 0.02, uBioSeed * 0.01));
+        vec3 col = mix(uFabric, uFabric * 0.55, grain * 0.35);
+        col = mix(col, uGlow, uLight * 0.04);
+        gl_FragColor = vec4(col, 0.52);
       }
     `,
   });
@@ -1269,9 +1466,9 @@ function applyCurtain() {
     u.uBioOctaves.value = params.bioOctaves;
     u.uBioSpeed.value = params.bioSpeed;
     u.uBioSeed.value = params.bioSeed;
-    u.uCreatures.value = params.criaturas;
     u.uFabric.value.set(params.bioColor);
   }
+  applyCreatureUniforms();
   placeBioProjector();
 }
 
@@ -1422,7 +1619,10 @@ function buildGui() {
   gui.add(params, "luz", 0.05, 1.4, 0.01).name("luz / cáustica").onChange(placeProjector);
   gui.add(params, "radioReflejo", 0.12, 2.4, 0.01).name("radio reflejo").onChange(placeProjector);
   const bio = gui.addFolder("biomaterial");
-  bio.add(params, "criaturas", 0, 1, 0.01).name("criaturas").onChange(applyCurtain);
+  bio.add(params, "criaturas", 0, 1, 0.01).name("criaturas").onChange(() => {
+    applyCreatureUniforms();
+    placeBioProjector();
+  });
   bio.addColor(params, "bioColor").name("color").onChange(applyCurtain);
   bio.add(params, "bioX", -4, 4, 0.01).name("x").onChange(applyCurtain);
   bio.add(params, "bioY", 0.2, 3.8, 0.01).name("y").onChange(applyCurtain);
@@ -1444,6 +1644,7 @@ function buildGui() {
   bioProy.add(params, "bioProyRotX", -180, 180, 1).name("rot x").onChange(placeBioProjector);
   bioProy.add(params, "bioProyRotY", -180, 180, 1).name("rot y").onChange(placeBioProjector);
   bioProy.add(params, "bioProyRotZ", -180, 180, 1).name("rot z").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRadio", 0.2, 6, 0.01).name("radio cono").onChange(placeBioProjector);
   bioProy.add(params, "bioProyCaustica").name("cáusticas agua").onChange(placeBioProjector);
   const lamp = gui.addFolder("lámpara");
   lamp.add(params, "proyector", { Arriba: "arriba", Abajo: "abajo" })
@@ -1460,6 +1661,8 @@ function buildGui() {
 
 function unlockAudio() {
   if (audio?.ctx?.state === "suspended") audio.ctx.resume();
+  ensureFieldSound();
+  if (fieldHowl && !fieldHowl.playing() && fieldVol > 0.002) fieldHowl.play();
 }
 
 function startAudio() {
@@ -1556,6 +1759,10 @@ function animate() {
       m.uniforms.uBioSpeed.value = params.bioSpeed;
       m.uniforms.uBioSeed.value = params.bioSeed;
     }
+  }
+  if (bioCreatureMat?.uniforms) {
+    bioCreatureMat.uniforms.uTime.value = t;
+    applyCreatureUniforms();
   }
 
   if (waterDisk?.material?.uniforms?.time) {
