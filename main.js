@@ -19,6 +19,12 @@ const params = {
   amplitud: 0.045,
   luz: 0.72,
   radioReflejo: 0.55,
+  vasoY: 2.25,
+  vasoAmp: 0,
+  vasoFreq: 2.4,
+  vasoOctaves: 3,
+  vasoSpeed: 0,
+  vasoSeed: 11,
   criaturas: 0.85,
   noiseDeform: 0.35,
   proyector: "abajo",
@@ -52,6 +58,7 @@ let hemi, keyLight, fillLight, rimLight;
 let waterNormals = null;
 let projectorGroup, projectorSpot, beamMesh, transducer;
 let rimMat = null;
+let vesselGeos = [];
 
 const WATER_NORMALS_URL = "./textures/waternormals.jpg";
 
@@ -246,7 +253,164 @@ function isRect() {
   return params.forma === "rectangular";
 }
 
-function waterOpts() {
+function fract(v) {
+  return v - Math.floor(v);
+}
+
+function hash3(x, y, z) {
+  x = fract(x * 0.3183099 + 0.1);
+  y = fract(y * 0.3183099 + 0.1);
+  z = fract(z * 0.3183099 + 0.1);
+  x *= 17;
+  y *= 17;
+  z *= 17;
+  return fract(x * y * z * (x + y + z));
+}
+
+function noise3(x, y, z) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const iz = Math.floor(z);
+  let fx = x - ix;
+  let fy = y - iy;
+  let fz = z - iz;
+  fx = fx * fx * (3 - 2 * fx);
+  fy = fy * fy * (3 - 2 * fy);
+  fz = fz * fz * (3 - 2 * fz);
+  const n = (i, j, k) => hash3(ix + i, iy + j, iz + k);
+  return (
+    mix(
+      mix(mix(n(0, 0, 0), n(1, 0, 0), fx), mix(n(0, 1, 0), n(1, 1, 0), fx), fy),
+      mix(mix(n(0, 0, 1), n(1, 0, 1), fx), mix(n(0, 1, 1), n(1, 1, 1), fx), fy),
+      fz
+    )
+  );
+}
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function fbm3(x, y, z, octaves) {
+  let v = 0;
+  let a = 0.5;
+  const oct = Math.max(1, Math.min(6, octaves | 0));
+  for (let i = 0; i < 6; i++) {
+    if (i >= oct) break;
+    v += a * noise3(x, y, z);
+    x = x * 2.07 + 0.13;
+    y = y * 2.07 + 0.13;
+    z = z * 2.07 + 0.13;
+    a *= 0.5;
+  }
+  return v;
+}
+
+function outlineScale(x, z, t) {
+  if (params.vasoAmp <= 1e-4) return 1;
+  const ang = Math.atan2(z, x);
+  const tt = t * params.vasoSpeed + params.vasoSeed * 0.13;
+  const n = fbm3(
+    Math.cos(ang) * params.vasoFreq,
+    Math.sin(ang) * params.vasoFreq,
+    tt,
+    params.vasoOctaves
+  );
+  return 1 + (n * 2 - 1) * params.vasoAmp;
+}
+
+function unitOutline(i, segs) {
+  const theta = (i / segs) * Math.PI * 2;
+  const c = Math.cos(theta);
+  const s = Math.sin(theta);
+  if (isRect()) {
+    const k = 1 / Math.max(Math.abs(c), Math.abs(s));
+    return [c * k, s * k];
+  }
+  return [c, s];
+}
+
+function makeWallGeo(segs, h) {
+  const pos = [];
+  const uvs = [];
+  const idx = [];
+  for (let i = 0; i <= segs; i++) {
+    const [x, z] = unitOutline(i, segs);
+    pos.push(x, h / 2, z, x, -h / 2, z);
+    uvs.push(i / segs, 1, i / segs, 0);
+  }
+  for (let i = 0; i < segs; i++) {
+    const a = i * 2;
+    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function makeCapGeo(rScale, segs) {
+  const pos = [0, 0, 0];
+  const nrm = [0, 0, 1];
+  const uv = [0.5, 0.5];
+  const idx = [];
+  for (let i = 0; i <= segs; i++) {
+    const [x, z] = unitOutline(i, segs);
+    pos.push(x * rScale, -z * rScale, 0);
+    nrm.push(0, 0, 1);
+    uv.push(x * 0.5 + 0.5, z * 0.5 + 0.5);
+  }
+  for (let i = 0; i < segs; i++) idx.push(0, i + 1, i + 2);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  return geo;
+}
+
+function registerVesselGeo(mesh, mode) {
+  const geo = mesh.geometry;
+  vesselGeos.push({
+    geo,
+    orig: Float32Array.from(geo.attributes.position.array),
+    mode,
+  });
+}
+
+function applyVesselDeform(t = clock?.elapsedTime ?? 0) {
+  for (const item of vesselGeos) {
+    const pos = item.geo.attributes.position;
+    const orig = item.orig;
+    for (let i = 0; i < pos.count; i++) {
+      const ox = orig[i * 3];
+      const oy = orig[i * 3 + 1];
+      const oz = orig[i * 3 + 2];
+      if (item.mode === "cap") {
+        const s = ox === 0 && oy === 0 ? 1 : outlineScale(ox, -oy, t);
+        pos.setXYZ(i, ox * s, oy * s, oz);
+      } else {
+        const s = outlineScale(ox, oz, t);
+        pos.setXYZ(i, ox * s, oy, oz * s);
+      }
+    }
+    pos.needsUpdate = true;
+    if (item.mode === "wall") item.geo.computeVertexNormals();
+  }
+  if (causticMat?.uniforms) {
+    const u = causticMat.uniforms;
+    if (u.uVasoAmp) u.uVasoAmp.value = params.vasoAmp;
+    if (u.uVasoFreq) u.uVasoFreq.value = params.vasoFreq;
+    if (u.uVasoOctaves) u.uVasoOctaves.value = params.vasoOctaves;
+    if (u.uVasoSpeed) u.uVasoSpeed.value = params.vasoSpeed;
+    if (u.uVasoSeed) u.uVasoSeed.value = params.vasoSeed;
+    if (u.uVasoTime) u.uVasoTime.value = t;
+  }
+}
+
+ function waterOpts() {
   return {
     textureWidth: 512,
     textureHeight: 512,
@@ -292,47 +456,30 @@ function rebuildVessel() {
 }
 
 function buildVessel() {
+  vesselGeos = [];
   vesselDisk = new THREE.Group();
   vesselBody = new THREE.Group();
   const rim = getRimMat();
   const h = 0.22;
+  const segs = 96;
 
-  if (isRect()) {
-    const t = 0.03;
-    const walls = [
-      new THREE.Mesh(new THREE.BoxGeometry(2, h, t), rim),
-      new THREE.Mesh(new THREE.BoxGeometry(2, h, t), rim),
-      new THREE.Mesh(new THREE.BoxGeometry(t, h, 2), rim),
-      new THREE.Mesh(new THREE.BoxGeometry(t, h, 2), rim),
-    ];
-    walls[0].position.set(0, 0, 1);
-    walls[1].position.set(0, 0, -1);
-    walls[2].position.set(1, 0, 0);
-    walls[3].position.set(-1, 0, 0);
-    const bottom = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), rim);
-    bottom.rotation.x = Math.PI / 2;
-    bottom.position.y = -h / 2;
-    waterDisk = new Water(new THREE.PlaneGeometry(1.88, 1.88), waterOpts());
-    waterDisk.rotation.x = -Math.PI / 2;
-    waterDisk.position.y = 0.02;
-    waterDisk.renderOrder = 2;
-    waterDisk.material.transparent = true;
-    vesselBody.add(...walls, bottom, waterDisk);
-  } else {
-    const glassDisk = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, h, 64, 1, true), rim);
-    const bottom = new THREE.Mesh(new THREE.CircleGeometry(1, 64), rim);
-    bottom.rotation.x = Math.PI / 2;
-    bottom.position.y = -h / 2;
-    waterDisk = new Water(new THREE.CircleGeometry(0.94, 128), waterOpts());
-    waterDisk.rotation.x = -Math.PI / 2;
-    waterDisk.position.y = 0.02;
-    waterDisk.renderOrder = 2;
-    waterDisk.material.transparent = true;
-    vesselBody.add(glassDisk, bottom, waterDisk);
-  }
+  const walls = new THREE.Mesh(makeWallGeo(segs, h), rim);
+  const bottom = new THREE.Mesh(makeCapGeo(1, segs), rim);
+  bottom.rotation.x = -Math.PI / 2;
+  bottom.position.y = -h / 2;
+  waterDisk = new Water(makeCapGeo(0.94, segs), waterOpts());
+  waterDisk.rotation.x = -Math.PI / 2;
+  waterDisk.position.y = 0.02;
+  waterDisk.renderOrder = 2;
+  waterDisk.material.transparent = true;
+  vesselBody.add(walls, bottom, waterDisk);
+  registerVesselGeo(walls, "wall");
+  registerVesselGeo(bottom, "cap");
+  registerVesselGeo(waterDisk, "cap");
+  applyVesselDeform(0);
 
   vesselDisk.add(vesselBody);
-  vesselDisk.position.set(0, 2.25, 0);
+  vesselDisk.position.set(0, params.vasoY, 0);
   scene.add(vesselDisk);
   buildCables();
 }
@@ -345,7 +492,7 @@ function buildCables() {
   cableGroup = new THREE.Group();
   const x = isRect() ? params.radio * 0.86 : params.radio * 0.62;
   const z = isRect() ? params.largo * 0.86 : params.radio * 0.62;
-  const top = 1.72;
+  const top = Math.max(0.25, 4.02 - params.vasoY);
   for (const [cx, cz] of [
     [-x, -z],
     [x, -z],
@@ -453,6 +600,12 @@ function buildCausticPatch() {
       uWaterColor: { value: new THREE.Color(params.colorAgua) },
       uSunColor: { value: new THREE.Color(params.sunColor) },
       uGlow: { value: new THREE.Color(0xc8d4e0) },
+      uVasoAmp: { value: params.vasoAmp },
+      uVasoFreq: { value: params.vasoFreq },
+      uVasoOctaves: { value: params.vasoOctaves },
+      uVasoSpeed: { value: params.vasoSpeed },
+      uVasoSeed: { value: params.vasoSeed },
+      uVasoTime: { value: 0 },
     },
     vertexShader: /* glsl */ `
       varying vec3 vWorldPos;
@@ -465,6 +618,7 @@ function buildCausticPatch() {
       varying vec3 vWorldPos;
       uniform sampler2D normalSampler;
       uniform float uTime, uSize, uDistortion, uLight, uNoise, uRect, uAlpha, uThrow, uWaterY;
+      uniform float uVasoAmp, uVasoFreq, uVasoOctaves, uVasoSpeed, uVasoSeed, uVasoTime;
       uniform vec2 uVesselHalf, uFootprintHalf, uPatchCenter;
       uniform vec3 uLampPos, uWaterColor, uSunColor, uGlow;
 
@@ -485,8 +639,43 @@ function buildCausticPatch() {
         return normalize(noise.xzy * vec3(1.5, 1.0, 1.5));
       }
 
+      float vasoHash(vec3 p){
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
+      float vasoNoise(vec3 x){
+        vec3 i = floor(x);
+        vec3 f = fract(x);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(vasoHash(i), vasoHash(i + vec3(1,0,0)), f.x),
+                         mix(vasoHash(i + vec3(0,1,0)), vasoHash(i + vec3(1,1,0)), f.x), f.y),
+                   mix(mix(vasoHash(i + vec3(0,0,1)), vasoHash(i + vec3(1,0,1)), f.x),
+                         mix(vasoHash(i + vec3(0,1,1)), vasoHash(i + vec3(1,1,1)), f.x), f.y), f.z);
+      }
+      float vasoFbm(vec3 p){
+        float v = 0.0;
+        float a = 0.5;
+        int oct = int(clamp(uVasoOctaves, 1.0, 6.0));
+        for (int i = 0; i < 6; i++) {
+          if (i >= oct) break;
+          v += a * vasoNoise(p);
+          p = p * 2.07 + 0.13;
+          a *= 0.5;
+        }
+        return v;
+      }
+
+      float vesselWarp(vec2 p) {
+        float ang = atan(p.y, p.x);
+        float tt = uVasoTime * uVasoSpeed + uVasoSeed * 0.13;
+        float n = vasoFbm(vec3(cos(ang) * uVasoFreq, sin(ang) * uVasoFreq, tt));
+        return max(0.15, 1.0 + (n * 2.0 - 1.0) * uVasoAmp);
+      }
+
       float vesselMask(vec2 worldXZ) {
         vec2 p = worldXZ / max(uVesselHalf, vec2(0.0001));
+        p /= vesselWarp(p);
         float maskCirc = 1.0 - smoothstep(0.82, 1.12, length(p));
         vec2 b = abs(p);
         float rBox = max(b.x, b.y);
@@ -579,7 +768,13 @@ function updateCausticUniforms() {
     params.radioReflejo,
     isRect() ? params.radioReflejo * (params.largo / Math.max(params.radio, 0.001)) : params.radioReflejo
   );
-  if (vesselDisk) u.uWaterY.value = vesselDisk.position.y;
+  u.uVasoAmp.value = params.vasoAmp;
+  u.uVasoFreq.value = params.vasoFreq;
+  u.uVasoOctaves.value = params.vasoOctaves;
+  u.uVasoSpeed.value = params.vasoSpeed;
+  u.uVasoSeed.value = params.vasoSeed;
+  u.uVasoTime.value = clock?.elapsedTime ?? 0;
+  u.uWaterY.value = params.vasoY;
   if (u.normalSampler) u.normalSampler.value = loadWaterNormals();
 }
 
@@ -687,17 +882,19 @@ function placeProjector() {
   const fromTop = params.proyector === "arriba";
   const ceilY = 4.02;
   const floorY = 0.018;
-  const waterY = 2.25;
+  const waterY = params.vasoY;
   const y0 = (fromTop ? 3.9 : 0.16) + params.lamparaY;
   const y1 = fromTop ? floorY : ceilY;
   const throwDist = Math.abs(y1 - waterY);
-  const spread = Math.min(1.35, throwDist * params.distortion * 0.05);
-  const footW = params.radioReflejo;
-  const footD = isRect()
+  const refThrow = fromTop ? Math.abs(2.25 - floorY) : Math.abs(ceilY - 2.25);
+  const throwScale = THREE.MathUtils.clamp(throwDist / Math.max(0.2, refThrow), 0.22, 3.4);
+  const spread = Math.min(1.85, throwDist * params.distortion * 0.05);
+  const footW = params.radioReflejo * throwScale;
+  const footD = (isRect()
     ? params.radioReflejo * (params.largo / Math.max(params.radio, 0.001))
-    : params.radioReflejo;
-  const patchW = Math.max(params.radio * 1.08 + spread, footW * 1.15);
-  const patchD = Math.max((isRect() ? params.largo : params.radio) * 1.08 + spread, footD * 1.15);
+    : params.radioReflejo) * throwScale;
+  const patchW = Math.max(params.radio * 1.08 * throwScale + spread, footW * 1.15);
+  const patchD = Math.max((isRect() ? params.largo : params.radio) * 1.08 * throwScale + spread, footD * 1.15);
   const patchR = Math.max(patchW, patchD);
   const lx = params.lamparaX;
   const lz = params.lamparaZ;
@@ -726,7 +923,10 @@ function placeProjector() {
   applyBeamColor();
 
   projectorGroup.position.copy(start);
-  projectorGroup.lookAt(end);
+  if (along.lengthSq() > 1e-8) {
+    projectorGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), along);
+  }
+  if (!fromTop) projectorGroup.rotateZ(Math.PI);
   projectorSpot.position.copy(start);
   projectorSpot.target.position.copy(end);
   projectorSpot.distance = h + 0.8;
@@ -748,6 +948,7 @@ function placeProjector() {
     );
     causticMat.uniforms.uFootprintHalf.value.set(footW, footD);
     causticMat.uniforms.uPatchCenter.value.set(hitX, hitZ);
+    causticMat.uniforms.uWaterY.value = waterY;
   }
 }
 
@@ -755,9 +956,16 @@ function applyRadius() {
   if (!vesselBody) return;
   if (isRect()) vesselBody.scale.set(params.radio, 1, params.largo);
   else vesselBody.scale.set(params.radio, 1, params.radio);
+  applyVesselDeform(clock?.elapsedTime ?? 0);
   buildCables();
   placeProjector();
   applyWaterUniforms();
+}
+
+function applyVesselHeight() {
+  if (vesselDisk) vesselDisk.position.y = params.vasoY;
+  buildCables();
+  placeProjector();
 }
 
 function buildCurtain() {
@@ -913,6 +1121,7 @@ function buildSpeakers() {
     g.lookAt(0, 2.1, 0);
     scene.add(g);
     speakers.push({ group: g, led: l.material });
+    l.material.emissiveIntensity = 0.12;
   }
 }
 
@@ -1011,6 +1220,12 @@ function buildGui() {
     .onChange(rebuildVessel);
   rec.add(params, "radio", 0.25, 1.2, 0.01).name("radio / ancho").onChange(applyRadius);
   rec.add(params, "largo", 0.2, 1.2, 0.01).name("largo (rect)").onChange(applyRadius);
+  rec.add(params, "vasoY", 0.4, 3.7, 0.01).name("altura").onChange(applyVesselHeight);
+  rec.add(params, "vasoAmp", 0, 0.55, 0.01).name("perlin amp").onChange(() => applyVesselDeform());
+  rec.add(params, "vasoFreq", 0.2, 8, 0.05).name("perlin freq").onChange(() => applyVesselDeform());
+  rec.add(params, "vasoOctaves", 1, 6, 1).name("octavas").onChange(() => applyVesselDeform());
+  rec.add(params, "vasoSpeed", 0, 1.5, 0.01).name("perlin vel");
+  rec.add(params, "vasoSeed", 0, 99, 1).name("semilla").onChange(() => applyVesselDeform());
   const agua = gui.addFolder("agua");
   agua.addColor(params, "colorAgua").name("color").onChange(applyWaterUniforms);
   agua.addColor(params, "sunColor").name("color sol").onChange(applyWaterUniforms);
@@ -1157,17 +1372,11 @@ function animate() {
   }
   updateCausticUniforms();
 
-  if (vesselDisk) {
-    vesselDisk.position.y = 2.25 + rumble.value * 0.012;
-  }
-
   if (keyLight) keyLight.intensity = 8 + params.luz * 32;
-  if (rimLight) rimLight.intensity = 1.2 + params.luz * 3.5 * rumble.value;
+  if (rimLight) rimLight.intensity = 1.2 + params.luz * 2.2;
 
-  speakers.forEach((s, i) => {
-    const pulse = 0.15 + rumble.value * (0.8 + 0.2 * Math.sin(t + i));
-    s.led.emissiveIntensity = pulse * (params.audio ? 1.4 : 0.35);
-  });
+  applyVesselDeform(t);
+  if (vesselDisk) vesselDisk.position.y = params.vasoY;
 
   if (transducer) {
     transducer.scale.setScalar(1.2 * (1 + rumble.value * 0.04));
