@@ -8,7 +8,7 @@ const params = {
   radio: 0.43,
   largo: 0.5,
   colorAgua: "#3d6a78",
-  sunColor: "#ffd49f",
+  sunColor: "#eaf0ff",
   sunElevation: 0,
   sunAzimuth: 25,
   distortion: 3.4,
@@ -17,7 +17,7 @@ const params = {
   alphaAgua: 0.9,
   frecuencia: 48,
   amplitud: 0.045,
-  luz: 0.9430788416,
+  luz: 0.55,
   radioReflejo: 0.64,
   vasoY: 1.68,
   vasoX: -0.43,
@@ -27,14 +27,14 @@ const params = {
   vasoOctaves: 3,
   vasoSpeed: 0,
   vasoSeed: 11,
-  criaturas: 0.9973515250990317,
+  criaturas: 0.05,
   noiseDeform: 0.35,
   proyector: "abajo",
   lamparaX: -0.35,
   lamparaZ: 0,
   lamparaY: 0.02,
-  temperatura: 2710.3481687457243,
-  estado: 0.922,
+  temperatura: 9000,
+  estado: 0,
   audio: false,
   bioX: -0.55,
   bioY: 0.4,
@@ -1584,8 +1584,11 @@ function applyState(data) {
   const next = data?.params && typeof data.params === "object" ? data.params : data;
   if (!next || typeof next !== "object") return;
   Object.keys(params).forEach((key) => {
+    if (key === "estado") return;
     if (next[key] !== undefined) params[key] = next[key];
   });
+  params.estado = 0;
+  applyEstadoMix();
   rebuildVessel();
   applyRoomTemp();
   applyCurtain();
@@ -1596,6 +1599,8 @@ function applyState(data) {
   else stopAudio();
   if (data?.camera?.position) camera.position.fromArray(data.camera.position);
   if (data?.camera?.target) controls.target.fromArray(data.camera.target);
+  const fader = document.getElementById("estado-range");
+  if (fader) fader.value = String(params.estado);
   if (gui?.controllersRecursive) {
     gui.controllersRecursive().forEach((c) => c.updateDisplay());
   } else {
