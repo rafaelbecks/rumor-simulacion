@@ -52,6 +52,9 @@ const params = {
   bioProyX: 0,
   bioProyY: 3.72,
   bioProyZ: -1.15,
+  bioProyRotX: -90,
+  bioProyRotY: 0,
+  bioProyRotZ: 0,
   bioProyCaustica: true,
 };
 
@@ -1022,15 +1025,53 @@ function applyVesselPose() {
   placeProjector();
 }
 
+function bioProjectorAlong() {
+  const eul = new THREE.Euler(
+    THREE.MathUtils.degToRad(params.bioProyRotX),
+    THREE.MathUtils.degToRad(params.bioProyRotY),
+    THREE.MathUtils.degToRad(params.bioProyRotZ),
+    "XYZ"
+  );
+  return new THREE.Vector3(0, 0, -1).applyEuler(eul).normalize();
+}
+
+function roomBeamHit(origin, dir) {
+  const planes = [
+    { n: new THREE.Vector3(0, 1, 0), p: new THREE.Vector3(0, 0.018, 0) },
+    { n: new THREE.Vector3(0, -1, 0), p: new THREE.Vector3(0, 4.02, 0) },
+    { n: new THREE.Vector3(1, 0, 0), p: new THREE.Vector3(-4.18, 0, 0) },
+    { n: new THREE.Vector3(-1, 0, 0), p: new THREE.Vector3(4.18, 0, 0) },
+    { n: new THREE.Vector3(0, 0, 1), p: new THREE.Vector3(0, 0, -3.18) },
+    { n: new THREE.Vector3(0, 0, -1), p: new THREE.Vector3(0, 0, 3.9) },
+  ];
+  let bestT = 12;
+  let bestN = new THREE.Vector3(0, 1, 0);
+  for (const { n, p } of planes) {
+    const denom = dir.dot(n);
+    if (Math.abs(denom) < 1e-4) continue;
+    const t = p.clone().sub(origin).dot(n) / denom;
+    if (t < 0.08 || t >= bestT) continue;
+    const hit = origin.clone().addScaledVector(dir, t);
+    if (Math.abs(hit.x) > 4.35 || hit.y < -0.05 || hit.y > 4.15 || Math.abs(hit.z) > 4.1) continue;
+    bestT = t;
+    bestN = n.clone();
+  }
+  return {
+    point: origin.clone().addScaledVector(dir, bestT),
+    normal: bestN,
+    dist: bestT,
+  };
+}
+
 function placeBioProjector() {
   if (!bioProjectorGroup || !bioBeamMesh || !bioProjectorSpot) return;
-  const floorY = 0.018;
   const start = new THREE.Vector3(params.bioProyX, params.bioProyY, params.bioProyZ);
-  const end = new THREE.Vector3(params.bioProyX, floorY, params.bioProyZ);
-  const dir = end.clone().sub(start);
-  const h = Math.max(dir.length(), 0.2);
+  const along = bioProjectorAlong();
+  if (along.lengthSq() < 1e-8) along.set(0, -1, 0);
+  const hit = roomBeamHit(start, along);
+  const end = hit.point;
+  const h = Math.max(hit.dist, 0.2);
   const mid = start.clone().add(end).multiplyScalar(0.5);
-  const along = new THREE.Vector3(0, -1, 0);
   const waterY = params.vasoY;
   const throwDist = Math.max(Math.abs(end.y - waterY), 0.12);
   const spread = Math.min(1.85, throwDist * params.distortion * 0.05);
@@ -1053,7 +1094,11 @@ function placeBioProjector() {
   }
 
   bioProjectorGroup.position.copy(start);
-  bioProjectorGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), along);
+  bioProjectorGroup.rotation.set(
+    THREE.MathUtils.degToRad(params.bioProyRotX),
+    THREE.MathUtils.degToRad(params.bioProyRotY),
+    THREE.MathUtils.degToRad(params.bioProyRotZ)
+  );
   bioProjectorSpot.position.copy(start);
   bioProjectorSpot.target.position.copy(end);
   bioProjectorSpot.distance = h + 0.8;
@@ -1064,9 +1109,9 @@ function placeBioProjector() {
   const showCaustics = params.bioProyCaustica;
   if (bioCausticPatch) {
     bioCausticPatch.visible = showCaustics;
-    bioCausticPatch.position.set(params.bioProyX, floorY, params.bioProyZ);
-    bioCausticPatch.rotation.x = -Math.PI / 2;
-    bioCausticPatch.scale.set(patchW, 1, patchD);
+    bioCausticPatch.position.copy(end).addScaledVector(hit.normal, 0.012);
+    bioCausticPatch.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hit.normal);
+    bioCausticPatch.scale.set(patchW, patchD, 1);
   }
   if (bioCurtainCaustic && curtainMesh) {
     bioCurtainCaustic.visible = showCaustics;
@@ -1076,7 +1121,6 @@ function placeBioProjector() {
     const n = new THREE.Vector3(0, 0, 1).applyQuaternion(curtainMesh.quaternion);
     bioCurtainCaustic.position.addScaledVector(n, 0.03);
   }
-  const lampHit = new THREE.Vector2(params.bioProyX, params.bioProyZ);
   if (bioCausticMat?.uniforms) {
     const u = bioCausticMat.uniforms;
     u.uThrow.value = throwDist;
@@ -1085,7 +1129,7 @@ function placeBioProjector() {
     u.uVesselHalf.value.set(params.radio, isRect() ? params.largo : params.radio);
     u.uVesselCenter.value.set(params.vasoX, params.vasoZ);
     u.uFootprintHalf.value.set(footW, footD);
-    u.uPatchCenter.value.copy(lampHit);
+    u.uPatchCenter.value.set(end.x, end.z);
     u.uWaterY.value = waterY;
   }
   if (bioCurtainCausticMat?.uniforms) {
@@ -1397,6 +1441,9 @@ function buildGui() {
   bioProy.add(params, "bioProyX", -3.2, 3.2, 0.01).name("x").onChange(placeBioProjector);
   bioProy.add(params, "bioProyY", 0.4, 4.0, 0.01).name("y").onChange(placeBioProjector);
   bioProy.add(params, "bioProyZ", -3.0, 2.6, 0.01).name("z").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRotX", -180, 180, 1).name("rot x").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRotY", -180, 180, 1).name("rot y").onChange(placeBioProjector);
+  bioProy.add(params, "bioProyRotZ", -180, 180, 1).name("rot z").onChange(placeBioProjector);
   bioProy.add(params, "bioProyCaustica").name("cáusticas agua").onChange(placeBioProjector);
   const lamp = gui.addFolder("lámpara");
   lamp.add(params, "proyector", { Arriba: "arriba", Abajo: "abajo" })
