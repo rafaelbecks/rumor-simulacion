@@ -111,6 +111,10 @@ let fieldVol = 0;
 
 const WATER_NORMALS_URL = "./textures/waternormals.jpg";
 
+const PRESENTATION = ["1", "true", "yes", "on"].includes(
+  (new URLSearchParams(location.search).get("presentacion") || "").toLowerCase()
+);
+
 const rumble = { value: 0 };
 const tmpColor = new THREE.Color();
 
@@ -1588,6 +1592,7 @@ function loadStateDialog() {
 }
 
 function buildGui() {
+  if (PRESENTATION) return;
   gui = new GUI({ title: "sala" });
   const estado = gui.addFolder("estado");
   estado.add({ guardar: saveState }, "guardar").name("guardar JSON");
