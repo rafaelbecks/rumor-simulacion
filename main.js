@@ -204,7 +204,7 @@ function bindOrganicWater(mesh) {
 const VIDEO_URL = "./video/proyector.mp4";
 
 let renderer, scene, camera, controls, clock, gui, hemi, fillLight;
-let waterDisk, vesselDisk, vesselBody, cableGroup;
+let waterDisk, waterVolume, vesselDisk, vesselBody, cableGroup;
 let floorMat, wallMat;
 let waterNormals = null;
 let projectorGroup, projectorSpot, beamMesh, transducer;
@@ -579,6 +579,7 @@ function applyWaterUniforms() {
   u.size.value = params.waveSize;
   u.alpha.value = params.alphaAgua;
   waterDisk.material.transparent = params.alphaAgua < 0.999;
+  if (waterVolume?.material?.color) waterVolume.material.color.set(params.colorAgua);
   const phi = THREE.MathUtils.degToRad(90 - params.sunElevation);
   const theta = THREE.MathUtils.degToRad(params.sunAzimuth);
   u.sunDirection.value.setFromSphericalCoords(1, phi, theta);
@@ -757,19 +758,179 @@ function waterOpts() {
 function getRimMat() {
   if (rimMat) return rimMat;
   rimMat = new THREE.MeshPhysicalMaterial({
-    color: 0xb8c4c0,
-    roughness: 0.12,
-    metalness: 0.05,
+    color: 0xd5e2de,
+    roughness: 0.08,
+    metalness: 0.02,
     transparent: true,
-    opacity: 0.32,
+    opacity: 0.22,
+    depthWrite: false,
     side: THREE.DoubleSide,
   });
   return rimMat;
 }
 
+function makeFillMaterial() {
+  return new THREE.MeshStandardMaterial({
+    color: params.colorAgua,
+    roughness: 0.35,
+    metalness: 0.02,
+    transparent: true,
+    opacity: 0.92,
+    depthWrite: true,
+    side: THREE.DoubleSide,
+  });
+}
+
+function bowlContours(root, segments) {
+  root.updateMatrixWorld(true);
+  const points = [];
+  const v = new THREE.Vector3();
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    const pos = child.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(child.matrixWorld);
+      points.push(v.x, v.y, v.z);
+    }
+  });
+  if (!points.length) return null;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 1; i < points.length; i += 3) {
+    minY = Math.min(minY, points[i]);
+    maxY = Math.max(maxY, points[i]);
+  }
+  const height = Math.max(maxY - minY, 1e-4);
+  const band = (low, high) => {
+    const radii = new Array(segments).fill(0);
+    for (let i = 0; i < points.length; i += 3) {
+      const t = (points[i + 1] - minY) / height;
+      if (t < low || t > high) continue;
+      const x = points[i];
+      const z = points[i + 2];
+      const idx = Math.round(((Math.atan2(z, x) + Math.PI) / (Math.PI * 2)) * segments) % segments;
+      radii[idx] = Math.max(radii[idx], Math.hypot(x, z));
+    }
+    for (let i = 0; i < segments; i++) {
+      if (radii[i] > 0.01) continue;
+      let prev = 0;
+      let next = 0;
+      for (let k = 1; k < segments && (!prev || !next); k++) {
+        if (!prev) prev = radii[(i - k + segments) % segments];
+        if (!next) next = radii[(i + k) % segments];
+      }
+      radii[i] = prev && next ? (prev + next) * 0.5 : prev || next || 0.2;
+    }
+    return radii.map((r, i) => {
+      const prev = radii[(i + segments - 1) % segments];
+      const next = radii[(i + 1) % segments];
+      return Math.max(0.03, (prev + r + next) / 3 - 0.012);
+    });
+  };
+  return { bottom: band(0, 0.22), top: band(0.72, 1.02), minY, maxY };
+}
+
+function buildFilledWater(rings) {
+  const seg = rings[0].radii.length;
+  const positions = [];
+  const uvs = [];
+  const push = (x, y, z, u, v) => {
+    positions.push(x, y, z);
+    uvs.push(u, v);
+    return positions.length / 3 - 1;
+  };
+  const rows = rings.map((ring) => {
+    const maxR = Math.max(...ring.radii, 0.001);
+    return ring.radii.map((r, i) => {
+      const a = (i / seg) * Math.PI * 2;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      return push(x, ring.y, z, x / (maxR * 2) + 0.5, z / (maxR * 2) + 0.5);
+    });
+  });
+  const indices = [];
+  for (let r = 0; r < rows.length - 1; r++) {
+    for (let i = 0; i < seg; i++) {
+      const i2 = (i + 1) % seg;
+      const a = rows[r][i];
+      const b = rows[r][i2];
+      const c = rows[r + 1][i];
+      const d = rows[r + 1][i2];
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+  const bottom = push(0, rings[0].y, 0, 0.5, 0.5);
+  for (let i = 0; i < seg; i++) indices.push(bottom, rows[0][(i + 1) % seg], rows[0][i]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function buildWaterCap(ring) {
+  const seg = ring.radii.length;
+  const maxR = Math.max(...ring.radii, 0.001);
+  const positions = [0, ring.y, 0];
+  const normals = [0, 1, 0];
+  const uvs = [0.5, 0.5];
+  const indices = [];
+  for (let i = 0; i < seg; i++) {
+    const a = (i / seg) * Math.PI * 2;
+    const r = ring.radii[i];
+    const x = Math.cos(a) * r;
+    const z = Math.sin(a) * r;
+    positions.push(x, ring.y, z);
+    normals.push(0, 1, 0);
+    uvs.push(x / (maxR * 2) + 0.5, z / (maxR * 2) + 0.5);
+  }
+  for (let i = 0; i < seg; i++) indices.push(0, i + 1, (i + 1) % seg + 1);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return geo;
+}
+
+function placeWater(parent, sourceMesh, bottomY, topY, fallbackRadius) {
+  const segments = 72;
+  const steps = 4;
+  const contour = sourceMesh ? bowlContours(sourceMesh, segments) : null;
+  const rings = [];
+  for (let s = 0; s <= steps; s++) {
+    const y = THREE.MathUtils.lerp(bottomY, topY, s / steps);
+    let radii = new Array(segments).fill(fallbackRadius);
+    if (contour) {
+      const t = THREE.MathUtils.clamp((y - contour.minY) / (contour.maxY - contour.minY), 0, 1);
+      radii = contour.bottom.map((b, i) => THREE.MathUtils.lerp(b, contour.top[i], t));
+    }
+    rings.push({ y, radii });
+  }
+  const volume = new THREE.Mesh(buildFilledWater(rings), makeFillMaterial());
+  volume.name = "agua_volumen";
+  volume.renderOrder = 1;
+  volume.frustumCulled = false;
+  parent.add(volume);
+  waterVolume = volume;
+  const capRing = { y: topY + 0.004, radii: rings[rings.length - 1].radii };
+  waterDisk = new Water(buildWaterCap(capRing), waterOpts());
+  waterDisk.name = "agua";
+  waterDisk.renderOrder = 2;
+  waterDisk.frustumCulled = false;
+  waterDisk.material.transparent = true;
+  bindOrganicWater(waterDisk);
+  parent.add(waterDisk);
+  const radii = capRing.radii;
+  return radii.reduce((sum, r) => sum + r, 0) / radii.length;
+}
+
 function disposeVessel() {
   if (transducer?.parent) transducer.parent.remove(transducer);
   if (waterDisk?.material) waterDisk.material.dispose();
+  if (waterVolume?.material) waterVolume.material.dispose();
+  waterVolume = null;
   if (!vesselDisk) return;
   scene.remove(vesselDisk);
   vesselDisk.traverse((o) => {
@@ -833,21 +994,17 @@ function buildProceduralVessel() {
   const segs = 96;
   const walls = new THREE.Mesh(makeWallGeo(segs, h), rim);
   walls.name = "pared";
+  walls.renderOrder = 3;
   const bottom = new THREE.Mesh(makeCapGeo(1, segs), rim);
   bottom.name = "fondo";
+  bottom.renderOrder = 3;
   bottom.rotation.x = -Math.PI / 2;
   bottom.position.y = -h / 2;
-  waterDisk = new Water(makeCapGeo(0.94, segs), waterOpts());
-  waterDisk.rotation.x = -Math.PI / 2;
-  waterDisk.position.y = 0.02;
-  waterDisk.renderOrder = 2;
-  waterDisk.name = "agua";
-  waterDisk.material.transparent = true;
-  bindOrganicWater(waterDisk);
-  vesselBody.add(walls, bottom, waterDisk);
+  vesselBody.add(walls, bottom);
+  vesselBody.updateMatrixWorld(true);
+  const waterR = placeWater(vesselBody, walls, -h / 2 + 0.004, 0.02, 0.9);
   registerVesselGeo(walls, "wall");
   registerVesselGeo(bottom, "cap");
-  registerVesselGeo(waterDisk, "cap");
   if (isRect()) vesselBody.scale.set(params.radio, 1, params.largo);
   else vesselBody.scale.set(params.radio, 1, params.radio);
   vesselDisk.add(vesselBody);
@@ -858,7 +1015,7 @@ function buildProceduralVessel() {
     bottomY: -h / 2,
     topY: h / 2,
     waterY: 0.02,
-    waterRadius: (isRect() ? Math.min(params.radio, params.largo) : params.radio) * 0.9,
+    waterRadius: waterR * (isRect() ? Math.min(params.radio, params.largo) : params.radio),
   };
 }
 
@@ -869,14 +1026,11 @@ function buildObjVessel(root) {
   vesselBody.name = "cuerpo";
   const obj = root.clone(true);
   obj.name = "malla";
-  const plateMat = getRimMat().clone();
-  plateMat.opacity = 0.82;
-  plateMat.transparent = true;
-  plateMat.side = THREE.DoubleSide;
-  plateMat.depthWrite = true;
+  const plateMat = getRimMat();
   obj.traverse((o) => {
     if (!o.isMesh) return;
     o.material = plateMat;
+    o.renderOrder = 3;
     o.castShadow = true;
     o.receiveShadow = true;
     o.frustumCulled = false;
@@ -908,21 +1062,16 @@ function buildObjVessel(root) {
       getRimMat()
     );
     walls.name = "pared";
+    walls.renderOrder = 3;
     walls.position.y = wallH / 2;
     walls.frustumCulled = false;
     vesselBody.add(walls);
     h = wallH;
   }
-  const waterR = params.radio * 0.78;
-  const waterY = plateFragment ? h * 0.62 : Math.max(0.01, h * 0.72);
-  waterDisk = new Water(new THREE.CircleGeometry(waterR, 80), waterOpts());
-  waterDisk.name = "agua";
-  waterDisk.rotation.x = -Math.PI / 2;
-  waterDisk.position.y = waterY;
-  waterDisk.renderOrder = 2;
-  waterDisk.material.transparent = true;
-  bindOrganicWater(waterDisk);
-  vesselDisk.add(vesselBody, waterDisk);
+  const waterY = plateFragment ? h * 0.62 : Math.max(0.02, h * 0.72);
+  vesselBody.updateMatrixWorld(true);
+  const waterR = placeWater(vesselDisk, vesselBody, 0.012, waterY, params.radio * 0.72);
+  vesselDisk.add(vesselBody);
   scene.add(vesselDisk);
   vesselMetrics = {
     radius: params.radio,
