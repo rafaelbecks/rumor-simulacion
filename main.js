@@ -451,6 +451,8 @@ function init() {
   applyEstadoMix();
 
   addEventListener("resize", onResize);
+  addEventListener("keydown", onCameraKeyDown);
+  addEventListener("keyup", onCameraKeyUp);
   addEventListener("pointerdown", () => {
     unlockAudio();
     if (params.videoPlay) video?.play?.().catch(() => {});
@@ -2332,6 +2334,57 @@ function onResize() {
   renderer.setSize(innerWidth, innerHeight);
 }
 
+const cameraKeys = { KeyW: false, KeyA: false, KeyS: false, KeyD: false };
+const _camForward = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
+const _camMove = new THREE.Vector3();
+
+function typingInField(event) {
+  const tag = event.target?.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || event.target?.isContentEditable;
+}
+
+function resetCamera() {
+  camera.position.fromArray(START_CAMERA.position);
+  controls.target.fromArray(START_CAMERA.target);
+}
+
+function onCameraKeyDown(event) {
+  if (typingInField(event)) return;
+  if (event.code === "KeyS" && event.shiftKey) {
+    resetCamera();
+    cameraKeys.KeyS = false;
+    event.preventDefault();
+    return;
+  }
+  if (event.code in cameraKeys) cameraKeys[event.code] = true;
+}
+
+function onCameraKeyUp(event) {
+  if (event.code in cameraKeys) cameraKeys[event.code] = false;
+}
+
+function moveCamera(delta) {
+  if (!cameraKeys.KeyW && !cameraKeys.KeyA && !cameraKeys.KeyS && !cameraKeys.KeyD) return;
+  camera.getWorldDirection(_camForward);
+  _camForward.y = 0;
+  if (_camForward.lengthSq() < 1e-8) _camForward.set(0, 0, -1);
+  _camForward.normalize();
+  _camRight.setFromMatrixColumn(camera.matrixWorld, 0);
+  _camRight.y = 0;
+  if (_camRight.lengthSq() < 1e-8) _camRight.set(1, 0, 0);
+  _camRight.normalize();
+  _camMove.set(0, 0, 0);
+  if (cameraKeys.KeyW) _camMove.add(_camForward);
+  if (cameraKeys.KeyS) _camMove.sub(_camForward);
+  if (cameraKeys.KeyD) _camMove.add(_camRight);
+  if (cameraKeys.KeyA) _camMove.sub(_camRight);
+  if (_camMove.lengthSq() < 1e-8) return;
+  _camMove.normalize().multiplyScalar(2.6 * delta);
+  camera.position.add(_camMove);
+  controls.target.add(_camMove);
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
@@ -2378,6 +2431,7 @@ function animate() {
     sub.cone.position.z = z + Math.sin(t * 22) * params.vibracion * fieldVol * 0.004;
   });
   if (params.audio) syncAudio();
+  moveCamera(delta);
   controls.update();
   renderer.render(scene, camera);
 }
