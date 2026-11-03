@@ -2156,8 +2156,8 @@ function buildGui() {
   estado.add({ cargar: loadStateDialog }, "cargar").name("cargar JSON");
 
   const espacio = gui.addFolder("espacio");
-  espacio.add(params, "salaAncho", 4, 24, 0.1).name("ancho m").onChange(applyRoomSize);
-  espacio.add(params, "salaLargo", 4, 24, 0.1).name("largo m").onChange(applyRoomSize);
+  espacio.add(params, "salaAncho", 2, 24, 0.1).name("ancho m").onChange(applyRoomSize);
+  espacio.add(params, "salaLargo", 2, 24, 0.1).name("largo m").onChange(applyRoomSize);
   espacio.add(params, "salaAlto", 2.4, 8, 0.05).name("alto m").onChange(applyRoomSize);
 
   const rec = gui.addFolder("recipiente");
