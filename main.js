@@ -231,11 +231,15 @@ const objLoader = new OBJLoader();
 const PRESENTATION = ["1", "true", "yes", "on"].includes(
   (new URLSearchParams(location.search).get("presentacion") || "").toLowerCase()
 );
+let estadoFromQuery = false;
 {
   const qsEstado = new URLSearchParams(location.search).get("estado");
   if (qsEstado != null && qsEstado !== "") {
     const v = parseFloat(qsEstado);
-    if (Number.isFinite(v)) params.estado = THREE.MathUtils.clamp(v, 0, 1);
+    if (Number.isFinite(v)) {
+      params.estado = THREE.MathUtils.clamp(v, 0, 1);
+      estadoFromQuery = true;
+    }
   }
 }
 
@@ -1889,6 +1893,7 @@ function setupVideo() {
     projMat.uniforms.uHasVideo.value = 1;
   };
   video.addEventListener("loadeddata", markReady);
+  video.addEventListener("loadedmetadata", () => seekVideo(params.videoPos));
   video.addEventListener("playing", markReady);
   video.addEventListener("error", () => {
     const folder = gui?.folders?.find((f) => f._title?.startsWith("video"));
@@ -2068,6 +2073,23 @@ function saveState() {
   a.download = rumorFilename();
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+function adoptInitial(data) {
+  const next = data?.params && typeof data.params === "object" ? data.params : data;
+  if (!next || typeof next !== "object") return;
+  const estado = params.estado;
+  Object.keys(params).forEach((key) => {
+    if (next[key] !== undefined) params[key] = next[key];
+  });
+  if (estadoFromQuery) params.estado = estado;
+  if (next.recipiente === undefined && next.forma) {
+    params.recipiente = next.forma === "rectangular" ? "rectangular" : "cilindro";
+  }
+  if (Array.isArray(data?.camera?.position) && Array.isArray(data?.camera?.target)) {
+    START_CAMERA.position = data.camera.position.slice();
+    START_CAMERA.target = data.camera.target.slice();
+  }
 }
 
 function applyState(data) {
@@ -2436,5 +2458,15 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-init();
-animate();
+async function boot() {
+  try {
+    const res = await fetch("./rumor-inicial.json", { cache: "no-store" });
+    if (res.ok) adoptInitial(await res.json());
+  } catch (err) {
+    console.error(err);
+  }
+  init();
+  animate();
+}
+
+boot();
